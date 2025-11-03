@@ -1,419 +1,363 @@
-
-import time
-import random
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import Tuple, Optional, Literal
 
 
-class Activation:
-    @staticmethod
-    def linear(Z):
-        A = Z
-        return A
+class SeparableConvolution:
+    def __init__(self):
+        pass
 
-    @staticmethod
-    def relu(Z):
-        A = np.maximum(0, Z)
-        return A
-
-    @staticmethod
-    def sigmoid(Z):
-        A = 1/(1+np.exp(-Z))
-        return A
-
-    @staticmethod
-    def tanh(x):
-        return np.tanh(x)
-
-    @staticmethod
-    def softmax(z):
-        expZ = np.exp(z)
-        return expZ/(np.sum(expZ, 0))
-
-    @staticmethod
-    def derivative_relu(Z):
-        return np.array(Z > 0, dtype='float')
-
-    @staticmethod
-    def derivative_tanh(x):
-        return (1 - np.power(x, 2))
-
-
-class Dropout:
-    @staticmethod
-    def apply_dropout(A, keep_prob, training=True):
-        """Apply dropout to activations"""
-        if training and keep_prob < 1:
-            mask = (np.random.rand(*A.shape) < keep_prob).astype(np.float32)
-            A = A * mask / keep_prob
-            return A, mask
-        return A, None
-
-    @staticmethod
-    def backward_dropout(dA, mask, keep_prob):
-        """Apply dropout mask during backpropagation"""
-        if mask is not None:
-            dA = dA * mask / keep_prob
-        return dA
-
-
-class Neuron:
-    def __init__(self, input_size):
-        self.input_size = input_size
-        self.weights = None
-        self.bias = None
-        self.output = None
-        self.input = None
-
-
-class Layer:
-    def __init__(self, layer_dims, layer_index):
-        self.layer_dims = layer_dims
-        self.layer_index = layer_index
-        self.neurons = [Neuron(layer_dims[layer_index-1])
-                        for _ in range(layer_dims[layer_index])]
-
-
-class Parameters:
-    def __init__(self, layer_dims):
-        self.layer_dims = layer_dims
-        self.parameters = {}
-        self.initialize_parameters()
-
-    def initialize_parameters(self):
-        S = len(self.layer_dims)
-        for s in range(1, S):
-            self.parameters['W' + str(s)] = np.random.randn(self.layer_dims[s],
-                                                            self.layer_dims[s-1]) / np.sqrt(self.layer_dims[s-1])
-            self.parameters['b' + str(s)] = np.zeros((self.layer_dims[s], 1))
-
-    def get_parameters(self):
-        return self.parameters
-
-
-class LossFunction:
-    @staticmethod
-    def compute_cost(AL, Y):
-        m = Y.shape[1]
-        if Y.shape[0] == 1:
-            cost = (1./m) * (-np.dot(Y, np.log(AL).T) -
-                             np.dot(1-Y, np.log(1-AL).T))
+    def add_padding(self, image: np.ndarray, padding: int) -> np.ndarray:
+        if len(image.shape) == 2:
+            return np.pad(image, ((padding, padding), (padding, padding)), mode='constant')
         else:
-            cost = -(1./m) * np.sum(Y * np.log(AL))
-        cost = np.squeeze(cost)
-        return cost
+            return np.pad(image, ((padding, padding), (padding, padding), (0, 0)), mode='constant')
 
+    def depthwise_convolution(self,
+                              image: np.ndarray,
+                              kernel: np.ndarray,
+                              stride: int = 1,
+                              padding: int = 0) -> np.ndarray:
+        """
+        Perform depthwise convolution.
+        Each channel is convolved with its own kernel independently.
 
-class ForwardProp:
-    def __init__(self, parameters, activation, keep_probs=None):
-        self.parameters = parameters
-        self.activation = activation
-        # keep_probs is a list of keep probabilities for each layer
-        # e.g., [1, 0.8, 0.7, 1] means no dropout for input and output layers
-        self.keep_probs = keep_probs
+        Args:
+            image: Input image of shape (H, W, C)
+            kernel: Depthwise kernel of shape (K_H, K_W, C) or (K_H, K_W)
+            stride: Stride for convolution
+            padding: Padding to add to the image
 
-    def forward_propagation(self, X, training=True):
-        forward_cache = {}
-        dropout_cache = {}  # Store dropout masks
-        L = len(self.parameters) // 2
-        forward_cache['A0'] = X
+        Returns:
+            Output of depthwise convolution with same number of channels as input
+        """
+        # Handle grayscale images
+        if len(image.shape) == 2:
+            image = image[:, :, np.newaxis]
 
-        # Hidden Layers
-        for l in range(1, L):
-            forward_cache['Z' + str(l)] = self.parameters['W' + str(l)].dot(
-                forward_cache['A' + str(l-1)]) + self.parameters['b' + str(l)]
+        if len(kernel.shape) == 2:
+            kernel = kernel[:, :, np.newaxis]
 
-            if self.activation == 'tanh':
-                forward_cache['A' +
-                              str(l)] = Activation.tanh(forward_cache['Z' + str(l)])
-            elif self.activation == 'relu':
-                forward_cache['A' +
-                              str(l)] = Activation.relu(forward_cache['Z' + str(l)])
-            elif self.activation == 'sigmoid':
-                forward_cache['A' +
-                              str(l)] = Activation.sigmoid(forward_cache['Z' + str(l)])
+        # Add padding if specified
+        if padding > 0:
+            image = self.add_padding(image, padding)
+
+        H, W, C = image.shape
+        K_H, K_W, K_C = kernel.shape
+
+        # For depthwise conv, number of kernels should match number of channels
+        assert C == K_C, f"Number of channels in image ({C}) must match kernel channels ({K_C})"
+
+        # Calculate output dimensions
+        out_H = (H - K_H) // stride + 1
+        out_W = (W - K_W) // stride + 1
+
+        # Initialize output
+        output = np.zeros((out_H, out_W, C))
+
+        # Perform depthwise convolution
+        for c in range(C):
+            for i in range(out_H):
+                for j in range(out_W):
+                    h_start = i * stride
+                    h_end = h_start + K_H
+                    w_start = j * stride
+                    w_end = w_start + K_W
+
+                    # Extract receptive field for current channel
+                    receptive_field = image[h_start:h_end, w_start:w_end, c]
+
+                    # Convolve with corresponding kernel
+                    output[i, j, c] = np.sum(receptive_field * kernel[:, :, c])
+
+        return output
+
+    def pointwise_convolution(self,
+                              image: np.ndarray,
+                              kernel: np.ndarray,
+                              stride: int = 1) -> np.ndarray:
+        """
+        Perform pointwise (1x1) convolution.
+        Combines information across channels using 1x1 kernels.
+
+        Args:
+            image: Input image of shape (H, W, C)
+            kernel: Pointwise kernel of shape (1, 1, C, N) or (C, N)
+                   where C is input channels and N is output channels
+            stride: Stride for convolution (usually 1 for pointwise)
+
+        Returns:
+            Output of pointwise convolution with N channels
+        """
+        # Handle grayscale images
+        if len(image.shape) == 2:
+            image = image[:, :, np.newaxis]
+
+        H, W, C = image.shape
+
+        # Reshape kernel if needed
+        if len(kernel.shape) == 2:
+            # Assume shape is (C, N)
+            kernel = kernel.reshape(1, 1, C, -1)
+        elif len(kernel.shape) == 3:
+            # Assume shape is (1, 1, C*N) and needs reshaping
+            kernel = kernel.reshape(1, 1, C, -1)
+
+        _, _, K_C, N = kernel.shape
+
+        assert C == K_C, f"Number of channels in image ({C}) must match kernel input channels ({K_C})"
+
+        # Calculate output dimensions
+        out_H = H // stride
+        out_W = W // stride
+
+        # Initialize output
+        output = np.zeros((out_H, out_W, N))
+
+        # Perform pointwise convolution
+        for n in range(N):
+            for i in range(out_H):
+                for j in range(out_W):
+                    h_idx = i * stride
+                    w_idx = j * stride
+
+                    # Pointwise conv: sum across all channels at a single spatial location
+                    output[i, j, n] = np.sum(
+                        image[h_idx, w_idx, :] * kernel[0, 0, :, n])
+
+        return output
+
+    def convolve(self,
+                 image: np.ndarray,
+                 kernel: np.ndarray,
+                 conv_type: Literal['depthwise', 'pointwise'] = 'depthwise',
+                 stride: int = 1,
+                 padding: int = 0) -> np.ndarray:
+        """
+        Main convolution function that performs either depthwise or pointwise convolution.
+
+        Args:
+            image: Input image
+            kernel: Convolution kernel
+            conv_type: Type of convolution ('depthwise' or 'pointwise')
+            stride: Stride for convolution
+            padding: Padding for convolution
+
+        Returns:
+            Convoluted image
+        """
+        if conv_type == 'depthwise':
+            return self.depthwise_convolution(image, kernel, stride, padding)
+        elif conv_type == 'pointwise':
+            return self.pointwise_convolution(image, kernel, stride)
+        else:
+            raise ValueError(
+                f"conv_type must be 'depthwise' or 'pointwise', got {conv_type}")
+
+    def visualize_results(self,
+                          original: np.ndarray,
+                          result: np.ndarray,
+                          conv_type: str,
+                          kernel: Optional[np.ndarray] = None):
+        """
+        Visualize the original and convoluted images.
+
+        Args:
+            original: Original input image
+            result: Convolution result
+            conv_type: Type of convolution performed
+            kernel: Kernel used (optional, for display)
+        """
+        fig, axes = plt.subplots(1, 3 if kernel is not None else 2,
+                                 figsize=(12 if kernel is not None else 10, 4))
+
+        # Original image
+        if len(original.shape) == 3 and original.shape[2] == 3:
+            axes[0].imshow(original)
+        else:
+            axes[0].imshow(original.squeeze(), cmap='gray')
+        axes[0].set_title('Original Image')
+        axes[0].axis('off')
+
+        # Kernel visualization (if provided)
+        if kernel is not None:
+            if len(kernel.shape) >= 2:
+                # For depthwise, show first channel; for pointwise, reshape and show
+                if conv_type == 'depthwise':
+                    kernel_vis = kernel[:, :, 0] if len(
+                        kernel.shape) > 2 else kernel
+                else:
+                    kernel_vis = kernel.squeeze()
+                    if len(kernel_vis.shape) > 2:
+                        kernel_vis = kernel_vis.reshape(-1,
+                                                        kernel_vis.shape[-1])
+
+                im = axes[1].imshow(kernel_vis, cmap='coolwarm')
+                axes[1].set_title(f'{conv_type.capitalize()} Kernel')
+                axes[1].axis('off')
+                plt.colorbar(im, ax=axes[1], fraction=0.046)
+
+        # Result
+        result_idx = 2 if kernel is not None else 1
+        if len(result.shape) == 3:
+            if result.shape[2] == 3:
+                axes[result_idx].imshow(result)
             else:
-                raise ValueError(f"Unknown activation: {self.activation}")
-
-            # Apply dropout to hidden layer
-            if self.keep_probs and l < len(self.keep_probs):
-                forward_cache['A' + str(l)], dropout_cache['D' + str(l)] = \
-                    Dropout.apply_dropout(forward_cache['A' + str(l)],
-                                          self.keep_probs[l],
-                                          training)
-
-        # Output Layer (no dropout)
-        forward_cache['Z' + str(L)] = self.parameters['W' + str(L)].dot(
-            forward_cache['A' + str(L-1)]) + self.parameters['b' + str(L)]
-
-        if forward_cache['Z' + str(L)].shape[0] == 1:
-            forward_cache['A' +
-                          str(L)] = Activation.sigmoid(forward_cache['Z' + str(L)])
+                # Show first channel for multi-channel output
+                axes[result_idx].imshow(result[:, :, 0], cmap='gray')
+                axes[result_idx].set_title(
+                    f'{conv_type.capitalize()} Result (Channel 0)')
         else:
-            forward_cache['A' +
-                          str(L)] = Activation.softmax(forward_cache['Z' + str(L)])
+            axes[result_idx].imshow(result.squeeze(), cmap='gray')
+            axes[result_idx].set_title(f'{conv_type.capitalize()} Result')
+        axes[result_idx].axis('off')
 
-        # Add dropout cache to forward cache
-        forward_cache.update(dropout_cache)
-
-        return forward_cache['A' + str(L)], forward_cache
-
-
-class BackProp:
-    def __init__(self, parameters, activation, keep_probs=None):
-        self.parameters = parameters
-        self.activation = activation
-        self.keep_probs = keep_probs
-
-    def backward_propagation(self, AL, Y, forward_cache):
-        grads = {}
-        L = len(self.parameters)//2
-        m = AL.shape[1]
-
-        grads["dZ" + str(L)] = AL - Y
-        grads["dW" + str(L)] = 1./m * np.dot(grads["dZ" + str(L)],
-                                             forward_cache['A' + str(L-1)].T)
-        grads["db" + str(L)] = 1./m * \
-            np.sum(grads["dZ" + str(L)], axis=1, keepdims=True)
-
-        for l in reversed(range(1, L)):
-            # First compute dA
-            dA = np.dot(
-                self.parameters['W' + str(l+1)].T, grads["dZ" + str(l+1)])
-
-            # Apply dropout if it was used in forward pass
-            if self.keep_probs and l < len(self.keep_probs) and 'D' + str(l) in forward_cache:
-                dA = Dropout.backward_dropout(
-                    dA, forward_cache['D' + str(l)], self.keep_probs[l])
-
-            # Then compute dZ through activation derivative
-            if self.activation == 'tanh':
-                grads["dZ" + str(l)] = dA * \
-                    Activation.derivative_tanh(forward_cache['A' + str(l)])
-            elif self.activation == 'sigmoid':
-                grads["dZ" + str(l)] = dA * (forward_cache['A' + str(l)]
-                                             * (1 - forward_cache['A' + str(l)]))
-            else:  # relu
-                grads["dZ" + str(l)] = dA * \
-                    Activation.derivative_relu(forward_cache['A' + str(l)])
-
-            grads["dW" + str(l)] = 1./m * np.dot(grads["dZ" + str(l)],
-                                                 forward_cache['A' + str(l-1)].T)
-            grads["db" + str(l)] = 1./m * \
-                np.sum(grads["dZ" + str(l)], axis=1, keepdims=True)
-
-        return grads
+        plt.tight_layout()
+        plt.show()
 
 
-class GradDescent:
-    def __init__(self, learning_rate):
-        self.learning_rate = learning_rate
-
-    def update_parameters(self, parameters, grads):
-        L = len(parameters) // 2
-        for l in range(L):
-            parameters["W" + str(l+1)] = parameters["W" + str(l+1)] - \
-                self.learning_rate * grads["dW" + str(l+1)]
-            parameters["b" + str(l+1)] = parameters["b" + str(l+1)] - \
-                self.learning_rate * grads["db" + str(l+1)]
-        return parameters
-
-
-class Model:
-
-    def __init__(self, layer_dims, learning_rate=0.03, activation='relu', keep_probs=None, batch_size=32):
-        self.batch_size = batch_size
-        self.input_mean = None
-        self.input_std = None
-        self.layer_dims = layer_dims
-        self.learning_rate = learning_rate
-        self.activation = activation
-        self.keep_probs = keep_probs
-        self.parameters = Parameters(layer_dims)
-        self.forward_prop = ForwardProp(
-            self.parameters.get_parameters(), activation, keep_probs)
-        self.back_prop = BackProp(
-            self.parameters.get_parameters(), activation, keep_probs)
-        self.grad_descent = GradDescent(learning_rate)
-
-    def create_mini_batches(self, X, Y):
-        """Create mini-batches from X and Y"""
-        m = X.shape[1]
-        mini_batches = []
-
-        # Shuffle the data
-        permutation = list(np.random.permutation(m))
-        shuffled_X = X[:, permutation]
-        shuffled_Y = Y[:, permutation].reshape((Y.shape[0], m))
-
-        # Calculate number of complete mini-batches
-        num_complete_minibatches = m // self.batch_size
-
-        # Create complete mini-batches
-        for k in range(num_complete_minibatches):
-            mini_batch_X = shuffled_X[:, k *
-                                      self.batch_size: (k+1) * self.batch_size]
-            mini_batch_Y = shuffled_Y[:, k *
-                                      self.batch_size: (k+1) * self.batch_size]
-            mini_batch = (mini_batch_X, mini_batch_Y)
-            mini_batches.append(mini_batch)
-
-        # Handle the last mini-batch if there are remaining samples
-        if m % self.batch_size != 0:
-            mini_batch_X = shuffled_X[:,
-                                      num_complete_minibatches * self.batch_size:]
-            mini_batch_Y = shuffled_Y[:,
-                                      num_complete_minibatches * self.batch_size:]
-            mini_batch = (mini_batch_X, mini_batch_Y)
-            mini_batches.append(mini_batch)
-
-        return mini_batches
-
-    def normalize_input(self, X, fit=False):
-        if fit:
-            # Calculate and store mean/std from training data
-            self.input_mean = np.mean(X, axis=1, keepdims=True)
-            # Add epsilon to avoid division by zero
-            self.input_std = np.std(X, axis=1, keepdims=True) + 1e-8
-
-        # Apply normalization
-        X_normalized = (X - self.input_mean) / self.input_std
-        return X_normalized
-
-    def predict(self, X, y):
-        m = X.shape[1]
-
-        X = self.normalize_input(X, fit=False)
-        # Use training=False for prediction (no dropout)
-        y_pred, caches = self.forward_prop.forward_propagation(
-            X, training=False)
-
-        if y.shape[0] == 1:
-            # Binary classification
-            y_pred = np.array(y_pred > 0.5, dtype='float')
-            accuracy = np.sum(y_pred == y) / m  # Use original y here
-        else:
-            # Multi-class classification
-            y_copy = np.argmax(y, 0)  # Convert one-hot to class indices
-            y_pred = np.argmax(y_pred, 0)
-            accuracy = np.sum(y_pred == y_copy) / m  # Use y_copy here
-
-        return np.round(accuracy, 2)
-
-    def train(self, X, Y, num_iterations=3000, X_train=None, Y_train=None, X_test=None, Y_test=None):
-        np.random.seed(1)
-        costs = []
-        parameters = self.parameters.get_parameters()
-
-        X = self.normalize_input(X, fit=True)  # Fit on training data
-        if X_train is not None:
-            X_train = self.normalize_input(X_train, fit=False)
-        if X_test is not None:
-            X_test = self.normalize_input(X_test, fit=False)
-
-        for mini_batch in mini_batches:
-            mini_batch_X, mini_batch_Y = mini_batch
-
-            # Forward propagation on mini-batch
-            AL, forward_cache = self.forward_prop.forward_propagation(
-                mini_batch_X, training=True)
-
-            # Compute cost for this mini-batch
-            mini_batch_cost = LossFunction.compute_cost(AL, mini_batch_Y)
-            epoch_cost += mini_batch_cost * \
-                mini_batch_X.shape[1]  # Weight by batch size
-
-            # Backward propagation on mini-batch
-            grads = self.back_prop.backward_propagation(
-                AL, mini_batch_Y, forward_cache)
-
-            # Update parameters after each mini-batch
-            parameters = self.grad_descent.update_parameters(parameters, grads)
-
-        # Calculate average cost for the epoch
-        epoch_cost = epoch_cost / X.shape[1]
-
-        # Print progress
-        if i % (num_iterations/10) == 0:
-            train_acc = self.predict(
-                X_train, Y_train) if X_train is not None else 0
-            test_acc = self.predict(
-                X_test, Y_test) if X_test is not None else 0
-            print("\niter:{} \t cost: {} \t train_acc:{} \t test_acc:{}".format(
-                i, np.round(epoch_cost, 2), train_acc, test_acc))
-
-        if i % 10 == 0:
-            print("==", end='')
-
-        return parameters
+def create_sample_image(size: Tuple[int, int] = (28, 28), channels: int = 3) -> np.ndarray:
+    """Create a sample image for testing."""
+    np.random.seed(42)
+    if channels == 1:
+        # Create a simple pattern for grayscale
+        image = np.zeros(size)
+        image[size[0]//4:3*size[0]//4, size[1]//4:3*size[1]//4] = 1
+        image[size[0]//3:2*size[0]//3, size[1]//3:2*size[1]//3] = 0.5
+        return image
+    else:
+        # Create RGB image with different patterns per channel
+        image = np.zeros((*size, channels))
+        for c in range(channels):
+            image[:, :, c] = np.random.rand(*size) * 0.5
+            # Add some structure
+            if c == 0:  # Red channel - horizontal gradient
+                image[:, :, c] += np.linspace(0, 0.5, size[1]).reshape(1, -1)
+            elif c == 1:  # Green channel - vertical gradient
+                image[:, :, c] += np.linspace(0, 0.5, size[0]).reshape(-1, 1)
+            else:  # Blue channel - diagonal pattern
+                image[:, :, c] += np.eye(size[0], size[1]) * 0.5
+        return np.clip(image, 0, 1)
 
 
-class Training:
-    def __init__(self, model):
-        self.model = model
+def create_depthwise_kernel(kernel_size: Tuple[int, int] = (3, 3), channels: int = 3) -> np.ndarray:
+    """Create a sample depthwise kernel."""
+    kernel = np.zeros((*kernel_size, channels))
 
-    def train_model(self, X, Y, num_iterations=3000, X_train=None, Y_train=None, X_test=None, Y_test=None):
-        return self.model.train(X, Y, num_iterations, X_train, Y_train, X_test, Y_test)
+    # Different filter for each channel
+    # Channel 0: Edge detection (horizontal)
+    kernel[:, :, 0] = np.array([[-1, -1, -1],
+                                [2,  2,  2],
+                                [-1, -1, -1]])[:kernel_size[0], :kernel_size[1]]
 
+    if channels > 1:
+        # Channel 1: Edge detection (vertical)
+        kernel[:, :, 1] = np.array([[-1,  2, -1],
+                                    [-1,  2, -1],
+                                    [-1,  2, -1]])[:kernel_size[0], :kernel_size[1]]
 
-# Dataset
-X_train = np.loadtxt('dataset/cat_train_x.csv', delimiter=',')/255.0
-Y_train = np.loadtxt('dataset/cat_train_y.csv',
-                     delimiter=',').reshape(1, X_train.shape[1])
-X_test = np.loadtxt('dataset/cat_test_x.csv', delimiter=',')/255.0
-Y_test = np.loadtxt('dataset/cat_test_y.csv',
-                    delimiter=',').reshape(1, X_test.shape[1])
+    if channels > 2:
+        # Channel 2: Blur
+        kernel[:, :, 2] = np.ones(kernel_size) / \
+            (kernel_size[0] * kernel_size[1])
 
-
-print(X_train.shape)
-print(Y_train.shape)
-print(X_test.shape)
-print(Y_test.shape)
-
-index = random.randrange(0, X_train.shape[1])
-plt.imshow(X_train[:, index].reshape(64, 64, 3))
-plt.show()
+    return kernel
 
 
-# Initialize Parameters
-layer_dims = [X_train.shape[0], 100, 200, Y_train.shape[0]]
-params = Parameters(layer_dims).get_parameters()
+def create_pointwise_kernel(input_channels: int = 3, output_channels: int = 2) -> np.ndarray:
+    """Create a sample pointwise (1x1) kernel."""
+    # Random weights for channel mixing
+    np.random.seed(42)
+    kernel = np.random.randn(1, 1, input_channels, output_channels) * 0.5
+    return kernel
 
-for s in range(1, len(layer_dims)):
-    print("Shape of W" + str(s) + ":", params['W' + str(s)].shape)
-    print("Shape of B" + str(s) + ":", params['b' + str(s)].shape, "\n")
 
-# Test forward propagation
-forward_prop = ForwardProp(params, 'relu')
-aL, forw_cache = forward_prop.forward_propagation(X_train)
+# Main execution
+if __name__ == "__main__":
+    # Initialize the convolution class
+    conv = SeparableConvolution()
 
-for l in range(len(params)//2 + 1):
-    print("Shape of A" + str(l) + " :", forw_cache['A' + str(l)].shape)
+    # Create sample data
+    image = create_sample_image(size=(28, 28), channels=3)
 
-# Test backward propagation
-back_prop = BackProp(params, 'relu')
-grads = back_prop.backward_propagation(
-    forw_cache["A" + str(3)], Y_train, forw_cache)
+    # Example 1: Depthwise Convolution
+    print("=" * 50)
+    print("DEPTHWISE CONVOLUTION")
+    print("=" * 50)
 
-for l in reversed(range(1, len(grads)//3 + 1)):
-    print("Shape of dZ" + str(l) + " :", grads['dZ' + str(l)].shape)
-    print("Shape of dW" + str(l) + " :", grads['dW' + str(l)].shape)
-    print("Shape of dB" + str(l) + " :", grads['db' + str(l)].shape, "\n")
+    depthwise_kernel = create_depthwise_kernel(kernel_size=(3, 3), channels=3)
 
-# Train model with dropout
-layers_dims = [X_train.shape[0], 16, 8, Y_train.shape[0]]  # 4-layer model
-lr = 0.0075
-iters = 2500
+    # Perform depthwise convolution with padding
+    result_depthwise = conv.convolve(
+        image=image,
+        kernel=depthwise_kernel,
+        conv_type='depthwise',
+        stride=1,
+        padding=1
+    )
 
-# Define dropout probabilities for each layer
-# [input_layer, hidden1, hidden2, output_layer]
-# No dropout on input (1.0) and output (1.0) layers
-keep_probs = [1.0, 0.8, 0.7, 1.0]  # 20% dropout on first hidden, 30% on second
+    print(f"Input shape: {image.shape}")
+    print(f"Depthwise kernel shape: {depthwise_kernel.shape}")
+    print(f"Output shape: {result_depthwise.shape}")
+    print(f"Note: Output channels = Input channels = {image.shape[2]}")
 
-model = Model(layers_dims, learning_rate=lr,
-              activation='relu', keep_probs=keep_probs,
-              batch_size=32)
-training = Training(model)
-parameters = training.train_model(X_train, Y_train, num_iterations=iters,
-                                  X_train=X_train, Y_train=Y_train,
-                                  X_test=X_test, Y_test=Y_test)
+    # Visualize
+    conv.visualize_results(image, result_depthwise,
+                           'depthwise', depthwise_kernel)
+
+    # Example 2: Pointwise Convolution
+    print("\n" + "=" * 50)
+    print("POINTWISE CONVOLUTION")
+    print("=" * 50)
+
+    pointwise_kernel = create_pointwise_kernel(
+        input_channels=3, output_channels=2)
+
+    # Perform pointwise convolution
+    result_pointwise = conv.convolve(
+        image=image,
+        kernel=pointwise_kernel,
+        conv_type='pointwise',
+        stride=1
+    )
+
+    print(f"Input shape: {image.shape}")
+    print(f"Pointwise kernel shape: {pointwise_kernel.shape}")
+    print(f"Output shape: {result_pointwise.shape}")
+    print(f"Note: Output channels = {pointwise_kernel.shape[-1]}")
+
+    # Visualize
+    conv.visualize_results(image, result_pointwise,
+                           'pointwise', pointwise_kernel)
+
+    # Example 3: Complete Depthwise Separable Convolution
+    print("\n" + "=" * 50)
+    print("DEPTHWISE SEPARABLE CONVOLUTION (Combined)")
+    print("=" * 50)
+
+    # Step 1: Depthwise
+    intermediate = conv.convolve(
+        image=image,
+        kernel=depthwise_kernel,
+        conv_type='depthwise',
+        stride=1,
+        padding=1
+    )
+
+    # Step 2: Pointwise
+    final_output = conv.convolve(
+        image=intermediate,
+        kernel=pointwise_kernel,
+        conv_type='pointwise',
+        stride=1
+    )
+
+    print(f"Original shape: {image.shape}")
+    print(f"After depthwise: {intermediate.shape}")
+    print(f"After pointwise: {final_output.shape}")
+    print(f"\nParameter reduction compared to standard convolution:")
+    std_params = 3 * 3 * 3 * 2  # Standard 3x3 conv: K_H * K_W * C_in * C_out
+    sep_params = (3 * 3 * 3) + (1 * 1 * 3 * 2)  # Depthwise + Pointwise
+    print(f"Standard conv parameters: {std_params}")
+    print(f"Separable conv parameters: {sep_params}")
+    print(f"Reduction: {(1 - sep_params/std_params)*100:.1f}%")
